@@ -1,14 +1,14 @@
-import json
+from json import loads
 
-from django.shortcuts import render, get_object_or_404
-from django.http import HttpResponse, JsonResponse
-from django.forms.models import model_to_dict
-from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 
-from rest_framework import generics
-from rest_framework.viewsets import ModelViewSet
-from rest_framework.permissions import IsAdminUser
-from rest_framework.decorators import api_view
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.status import HTTP_400_BAD_REQUEST
+from rest_framework.generics import ListAPIView
+from rest_framework.mixins import UpdateModelMixin
+from rest_framework.views import APIView
 
 from .models import Person, Apartment
 from .serializers import PersonSerializer, ApartmentSerializer
@@ -18,138 +18,86 @@ def index(request):
     return HttpResponse("Index page")
 
 
-class PersonViewSet(ModelViewSet):
-    queryset = Person.objects.all().order_by("id")
-    serializer_class = PersonSerializer
-
-
-class ApartmentViewSet(ModelViewSet):
-    queryset = Apartment.objects.all()
-    serializer_class = ApartmentSerializer
-
-
-
-
-
-# =========================================================================
-#                               Views
-# =========================================================================
-class PersonView(generics.CreateAPIView, generics.ListCreateAPIView, generics.GenericAPIView):
+class PersonList(ListAPIView):
     queryset = Person.objects.all()
     serializer_class = PersonSerializer
-    # permission_classes = [IsAdminUser]
-
-    def list(self, request, *args, **kwargs):
-        # Note the use of `get_queryset()` instead of `self.queryset`
-        serializer = self.serializer_class(self.get_queryset(), many=True)
-        return JsonResponse(serializer.data)
-
-    def perform_create(self, request, *args, **kwargs):
-        person = get_object_or_404(Person, id=self.request.data.get('name'))
-        return self.serializer_class.save(person)
+    permission_classes = (IsAuthenticated,)
 
 
-# =========================================================================
-#                               PERSON
-# =========================================================================
-def get_person(request, person_id):
-    person = get_object_or_404(Person, id=person_id)
-    return JsonResponse(model_to_dict(person))
+class PersonDetail(APIView):
+    model = Person
+    serializer = PersonSerializer
+    permission_classes = (IsAuthenticated,)
+
+    def get_object(self, pk):
+        return get_object_or_404(self.model, pk=pk)
+
+    def get(self, request, pk):
+        instance = get_object_or_404(self.model, pk=pk)
+        serializer = self.serializer(instance)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = self.serializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+
+        return Response(status=HTTP_400_BAD_REQUEST)
+
+    def put(self, request, pk):
+        serializer = self.serializer(data=request.data)
+        if serializer.is_valid(raise_exception=True):
+            serializer.update(self.get_object(pk), serializer.data)
+            return Response(f"{self.model.__name__} #{pk} was changed")
+
+        return Response(status=HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        get_object_or_404(self.model, pk=pk).delete()
+        return Response(f"{self.model.__name__} #{pk} was deleted")
 
 
-@csrf_exempt
-def create_person(request):
-    name = json.loads(request.body.decode("utf-8")).get("name")
-    if name and isinstance(name, str):
-        new_person = Person.objects.create(name=name)
-        return JsonResponse({"msg": f"Person #{new_person.id} is created"})
+class ApartmentList(ListAPIView):
+    serializer_class = ApartmentSerializer
+    permission_classes = (IsAuthenticated,)
 
-    return JsonResponse({"msg": "Field 'name' is incorrect"}, status=400)
+    def get_queryset(self):
+        """
+        Optionally restricts the returned purchases to a given user,
+        by filtering against a `username` query parameter in the URL.
+        """
+        try:
+            address = loads(self.request.query_params.get("address"))
+        except TypeError:
+            address = None
 
+        try:
+            furniture = loads(self.request.query_params.get("furniture"))
+        except TypeError:
+            furniture = None
 
-@csrf_exempt
-def update_person(request, person_id):
-    if request.method != "PUT":
-        return JsonResponse({"msg": "Only 'PUT' methods"}, status=400)
+        owner = self.request.query_params.get("owner")
 
-    person = get_object_or_404(Person, id=person_id)
-    name = json.loads(request.body.decode("utf-8")).get("name")
-    if name is None:
-        return JsonResponse({"msg": "Field 'name' is empty"}, status=400)
+        queryset = Apartment.objects.all()
+        if address is not None:
+            queryset = queryset.filter(address__exact=address)
+        if furniture is not None:
+            queryset = queryset.filter(furniture__exact=furniture)
+        if owner is not None:
+            queryset = queryset.filter(owner__name__contains=owner)
 
-    person.name = name
-    person.save()
-    return JsonResponse({"msg": f"Person #{person.id} is updated"})
-
-
-@csrf_exempt
-def delete_person(request, person_id):
-    if request.method != "DELETE":
-        return JsonResponse({"msg": "Only 'DELETE' methods"}, status=400)
-
-    person = get_object_or_404(Person, id=person_id)
-    person.delete()
-    return JsonResponse({"msg": f"Person #{person_id} is deleted"})
+        return queryset
 
 
-# =========================================================================
-#                               APARTMENT
-# =========================================================================
-def get_apartment(request, apartment_id):
-    apartment = get_object_or_404(Apartment, id=apartment_id)
-    return JsonResponse(model_to_dict(apartment))
+class ApartmentDetail(PersonDetail, UpdateModelMixin):
+    model = Apartment
+    serializer = ApartmentSerializer
 
+    def patch(self, request, pk):
+        serializer = self.serializer(data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.update(self.get_object(pk), serializer.initial_data)
+            return Response(f"{self.model.__name__} #{pk} was changed")
 
-def get_apartment_list(request):
-    data = []
-    for each in Apartment.objects.all():
-        data.append(model_to_dict(each))
-
-    return JsonResponse({"data": data})
-
-
-@csrf_exempt
-def create_apartment(request):
-    if request.method != "POST":
-        return JsonResponse({"msg": "Only 'POST' methods"}, status=400)
-
-    input_data = json.loads(request.body.decode("utf-8"))
-    if not (input_data.get("address") or input_data.get("furniture") or input_data.get("owner")):
-        return JsonResponse({"msg": "Required fields if empty"}, status=400)
-
-    checked_person = get_object_or_404(Person, id=input_data["owner"])
-    new_apartment = Apartment.objects.create(owner=checked_person,
-                                             address=input_data["address"],
-                                             furniture=input_data["furniture"])
-    return JsonResponse({"msg": f"Apartment #{new_apartment.id} is created"}, status=400)
-
-
-@csrf_exempt
-def update_apartment(request, apartment_id):
-    if request.method != "PUT":
-        return JsonResponse({"msg": "Only 'PUT' methods"}, status=400)
-
-    try:
-        input_data = json.loads(request.body.decode("utf-8"))
-    except json.decoder.JSONDecodeError as e:
-        return JsonResponse({"msg": str(e)}, status=400)
-
-    apartment = get_object_or_404(Apartment, id=apartment_id)
-    if input_data.get("owner"):
-        apartment.owner = get_object_or_404(Person, id=input_data['owner'])
-    if input_data.get("address"):
-        apartment.address = input_data["address"]
-    if input_data.get("furniture"):
-        apartment.furniture = input_data["furniture"]
-
-    apartment.save()
-    return JsonResponse({"msg": f"Apartment #{apartment.id} is updated"})
-
-
-@csrf_exempt
-def delete_apartment(request, apartment_id):
-    if request.method != "DELETE":
-        return JsonResponse({"msg": "Only 'DELETE' methods"}, status=400)
-
-    get_object_or_404(Apartment, id=apartment_id).delete()
-    return JsonResponse({"msg": f"Apartment #{apartment_id} is deleted"})
+        return Response(status=HTTP_400_BAD_REQUEST)
